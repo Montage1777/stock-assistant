@@ -233,7 +233,7 @@ def main():
             })
 
         # 防止请求太快
-        time.sleep(0.12)
+        time.sleep(0.3)
 
     report = make_report(results)
 
