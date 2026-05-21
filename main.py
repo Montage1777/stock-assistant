@@ -34,21 +34,37 @@ def push_to_wechat(title, content):
 
 def get_stock_pool():
     """
-    获取股票池，带重试机制
+    获取A股股票代码列表。
+    不使用 stock_zh_a_spot_em，避免 GitHub Actions 访问东方财富实时行情时断连。
     """
     last_error = None
 
     for i in range(5):
         try:
-            print(f"第 {i + 1} 次尝试获取A股列表...")
+            print(f"第 {i + 1} 次尝试获取A股代码列表...")
 
-            df = ak.stock_zh_a_spot_em()
+            df = ak.stock_info_a_code_name()
 
             if df is None or df.empty:
                 raise Exception("获取到的股票列表为空")
 
-            print("成功获取A股列表")
+            print("成功获取A股代码列表")
             print("字段：", list(df.columns))
+            print("原始数量：", len(df))
+
+            # 兼容字段名
+            # AkShare 这个接口常见字段是 code、name
+            if "code" in df.columns:
+                df = df.rename(columns={"code": "代码"})
+
+            if "name" in df.columns:
+                df = df.rename(columns={"name": "名称"})
+
+            if "代码" not in df.columns or "名称" not in df.columns:
+                raise Exception(f"股票代码列表字段异常：{list(df.columns)}")
+
+            # 确保代码是6位字符串
+            df["代码"] = df["代码"].astype(str).str.zfill(6)
 
             # 排除 ST
             df = df[~df["名称"].str.contains("ST", na=False)]
@@ -60,51 +76,54 @@ def get_stock_pool():
             df = df[~df["代码"].astype(str).str.startswith("8")]
             df = df[~df["代码"].astype(str).str.startswith("4")]
 
-            # 排除异常价格
-            df = df[df["最新价"].notna()]
-            df = df[df["最新价"] > 0]
+            # 先只扫前300只，确保免费环境能跑通
+            # 跑通后你可以改成 500、800、1000
+            df = df.head(300)
 
-            # 如果有成交额字段，就按成交额排序
-            if "成交额" in df.columns:
-                df = df.sort_values("成交额", ascending=False)
-
-            # 先只扫前500只，更稳
-            df = df.head(500)
+            print("过滤后数量：", len(df))
 
             return df
 
         except Exception as e:
             last_error = e
-            print(f"第 {i + 1} 次获取股票池失败：{e}")
+            print(f"第 {i + 1} 次获取股票代码列表失败：{e}")
             time.sleep(10)
 
-    raise Exception(f"连续5次获取股票池失败，最后错误：{last_error}")
-
+    raise Exception(f"连续5次获取股票代码列表失败，最后错误：{last_error}")
 
 
 def get_hist(code):
     """
-    获取单只股票历史日线
+    获取单只股票历史日线，带重试。
     """
-    try:
-        end_date = datetime.now().strftime("%Y%m%d")
+    last_error = None
 
-        hist = ak.stock_zh_a_hist(
-            symbol=code,
-            period="daily",
-            start_date="20240101",
-            end_date=end_date,
-            adjust="qfq"
-        )
+    for i in range(3):
+        try:
+            end_date = datetime.now().strftime("%Y%m%d")
 
-        if hist is None or hist.empty:
-            return None
+            hist = ak.stock_zh_a_hist(
+                symbol=code,
+                period="daily",
+                start_date="20240101",
+                end_date=end_date,
+                adjust="qfq"
+            )
 
-        return hist.tail(120).copy()
+            if hist is None or hist.empty:
+                raise Exception("历史行情为空")
 
-    except Exception as e:
-        print(f"{code} 获取失败：{e}")
-        return None
+            hist = hist.tail(120).copy()
+
+            return hist
+
+        except Exception as e:
+            last_error = e
+            print(f"{code} 第 {i + 1} 次获取历史数据失败：{e}")
+            time.sleep(3)
+
+    print(f"{code} 连续3次获取历史数据失败，跳过。最后错误：{last_error}")
+    return None
 
 
 def add_indicators(df):
@@ -125,6 +144,12 @@ def add_indicators(df):
 def check_strategy(hist):
     """
     策略判断
+
+    当前示例策略：
+    1. 收盘价站上 MA20
+    2. MA5 > MA10 > MA20
+    3. 成交量大于5日均量1.5倍
+    4. 20日涨幅小于40%
     """
     if hist is None or len(hist) < 60:
         return False, ""
@@ -192,7 +217,7 @@ def make_report(results):
     for i, item in enumerate(results[:30], 1):
         lines.append(
             f"{i}. {item['代码']} {item['名称']}<br>"
-            f"最新价：{item['最新价']}<br>"
+            f"最新价/收盘价：{item['最新价']}<br>"
             f"涨跌幅：{item['涨跌幅']}%<br>"
             f"成交额：{item['成交额']}<br>"
             f"理由：{item['理由']}<br><br>"
@@ -220,20 +245,27 @@ def main():
         print(f"扫描 {code} {name}")
 
         hist = get_hist(code)
+
+        if hist is None or hist.empty:
+            time.sleep(0.4)
+            continue
+
         passed, reason = check_strategy(hist)
 
         if passed:
+            latest = hist.iloc[-1]
+
             results.append({
                 "代码": code,
                 "名称": name,
-                "最新价": row.get("最新价", ""),
-                "涨跌幅": row.get("涨跌幅", ""),
-                "成交额": row.get("成交额", ""),
+                "最新价": latest.get("收盘", ""),
+                "涨跌幅": latest.get("涨跌幅", ""),
+                "成交额": latest.get("成交额", ""),
                 "理由": reason
             })
 
         # 防止请求太快
-        time.sleep(0.3)
+        time.sleep(0.4)
 
     report = make_report(results)
 
