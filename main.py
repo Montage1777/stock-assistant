@@ -34,29 +34,52 @@ def push_to_wechat(title, content):
 
 def get_stock_pool():
     """
-    获取股票池
+    获取股票池，带重试机制
     """
-    df = ak.stock_zh_a_spot_em()
+    last_error = None
 
-    # 排除 ST
-    df = df[~df["名称"].str.contains("ST", na=False)]
+    for i in range(5):
+        try:
+            print(f"第 {i + 1} 次尝试获取A股列表...")
 
-    # 排除退市
-    df = df[~df["名称"].str.contains("退", na=False)]
+            df = ak.stock_zh_a_spot_em()
 
-    # 排除北交所，常见 8、4 开头
-    df = df[~df["代码"].astype(str).str.startswith("8")]
-    df = df[~df["代码"].astype(str).str.startswith("4")]
+            if df is None or df.empty:
+                raise Exception("获取到的股票列表为空")
 
-    # 排除异常价格
-    df = df[df["最新价"].notna()]
-    df = df[df["最新价"] > 0]
+            print("成功获取A股列表")
+            print("字段：", list(df.columns))
 
-    # 只扫描成交额前800只，免费环境更稳定
-    df = df.sort_values("成交额", ascending=False)
-    df = df.head(800)
+            # 排除 ST
+            df = df[~df["名称"].str.contains("ST", na=False)]
 
-    return df
+            # 排除退市
+            df = df[~df["名称"].str.contains("退", na=False)]
+
+            # 排除北交所，常见 8、4 开头
+            df = df[~df["代码"].astype(str).str.startswith("8")]
+            df = df[~df["代码"].astype(str).str.startswith("4")]
+
+            # 排除异常价格
+            df = df[df["最新价"].notna()]
+            df = df[df["最新价"] > 0]
+
+            # 如果有成交额字段，就按成交额排序
+            if "成交额" in df.columns:
+                df = df.sort_values("成交额", ascending=False)
+
+            # 先只扫前500只，更稳
+            df = df.head(500)
+
+            return df
+
+        except Exception as e:
+            last_error = e
+            print(f"第 {i + 1} 次获取股票池失败：{e}")
+            time.sleep(10)
+
+    raise Exception(f"连续5次获取股票池失败，最后错误：{last_error}")
+
 
 
 def get_hist(code):
